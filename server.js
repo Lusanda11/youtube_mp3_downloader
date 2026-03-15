@@ -1,163 +1,173 @@
 // ****************** server.js *********************
 
 
-
 // Import required modules.
 // ----------------------------------------------------------------------------------------------------------------------------
-    const express = require("express"); // Express framework for creating a server and handling HTTP requests.
-    const playdl = require("play-dl"); // Play-DL library for fetching YouTube playlist metadata.
-    const youtubedl = require("youtube-dl-exec"); // youtube-dl-exec for downloading and converting YouTube videos.
-    const fs = require("fs"); // Node.js File System module to handle file operations.
-    const path = require("path"); // Node.js Path module to handle file paths.
+    const express = require("express");          // Express framework for building the server and API endpoints.
+    const playdl = require("play-dl");           // Library used to retrieve YouTube video or playlist metadata.
+    const youtubedl = require("youtube-dl-exec"); // Wrapper for yt-dlp / youtube-dl used to download media files.
+    const fs = require("fs");                    // Node.js File System module for working with files and directories.
+    const path = require("path");                // Node.js Path module to safely construct system file paths.
 // ----------------------------------------------------------------------------------------------------------------------------
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    The required modules are imported:
-    express is used to create a server and handle routing.
-    play-dl fetches metadata from YouTube playlists.
-    youtube-dl-exec is used to download videos and convert them to audio formats.
-    fs is for file and directory management.
-    path helps construct file paths in a cross-platform way.
-\* -------------------------------------------------------------------------------------------------------------------------- */
 
-
-// Initialize an Express application and define the port.
+// Initialize Express and configure server port.
 // ----------------------------------------------------------------------------------------------------------------------------
-    const app = express(); // Creates an instance of the Express application.
-    const port = 3000; // Port number where the server will listen for requests.
+    const app = express();   // Creates an Express application instance.
+    const port = 3000;       // Defines the port the server will run on.
 // ----------------------------------------------------------------------------------------------------------------------------
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Initializes the Express app and sets the server to listen on port 3000.
-\* -------------------------------------------------------------------------------------------------------------------------- */
 
-
-// Define the /download-album endpoint.
+// Define the /download endpoint.
 // ----------------------------------------------------------------------------------------------------------------------------
     app.get("/download-album", async (req, res) =>
     {
-        const { url } = req.query; // Extracts the 'url' query parameter from the request.
+        const { url, type } = req.query;
+        // Extracts two query parameters from the request:
+        // url  → YouTube link (playlist, mix, or single video)
+        // type → Determines whether we download "audio" or "video"
 
+
+// Validate request parameters.
+// ------------------------------------------------------------------------------------------------------------------------
         if (!url)
         {
-            return res.status(400).send("Error: No URL provided"); // Returns a 400 error if URL is missing.
+            return res.status(400).send("Error: No URL provided");
         }
-// ----------------------------------------------------------------------------------------------------------------------------
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Defines a GET endpoint /download-album.
-    Extracts the url query parameter from the request.
-    Checks if the url parameter is provided; if not, sends a 400 status error.
-\* -------------------------------------------------------------------------------------------------------------------------- */
+        if (!type || (type !== "audio" && type !== "video"))
+        {
+            return res.status(400).send("Error: type must be 'audio' or 'video'");
+        }
+// ------------------------------------------------------------------------------------------------------------------------
 
 
-// Fetching Playlist Information with Play-DL.
-// ----------------------------------------------------------------------------------------------------------------------------
         try
         {
-            const playlist = await playdl.playlist_info(url); // Fetches playlist metadata from the provided URL.
-            const videoList = await playlist.all_videos(); // Retrieves an array of videos in the playlist.
-// ----------------------------------------------------------------------------------------------------------------------------
+            let videoList = [];
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Using play-dl, retrieves metadata of the playlist specified by the url.
-    Calls all_videos() to get a list of all videos within the playlist.
-\* -------------------------------------------------------------------------------------------------------------------------- */
-
-
-// Ensure 'downloads' directory exists.
-// ----------------------------------------------------------------------------------------------------------------------------
-            if (!fs.existsSync(path.join(__dirname, "downloads")))
+// Smart detection of playlist vs single video.
+// --------------------------------------------------------------------------------------------------------------------
+            try
             {
-                fs.mkdirSync(path.join(__dirname, "downloads")); // Creates the 'downloads' directory if it doesn't already exist.
+                // Attempt to treat the URL as a playlist first.
+                const playlist = await playdl.playlist_info(url, { incomplete: true });
+
+                // Retrieve all videos from the playlist.
+                videoList = await playlist.all_videos();
+
+                console.log("Detected: PLAYLIST");
             }
-// ----------------------------------------------------------------------------------------------------------------------------
+            catch
+            {
+                // If playlist detection fails, treat it as a single video or YouTube mix.
+                const video = await playdl.video_basic_info(url);
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Checks if the downloads directory exists; if not, creates it.
-    This ensures that all downloaded files will have a designated folder.
-\* -------------------------------------------------------------------------------------------------------------------------- */
+                videoList = [{
+                    title: video.video_details.title,
+                    id: video.video_details.id,
+                    url: `https://www.youtube.com/watch?v=${video.video_details.id}`
+                }];
+
+                console.log("Detected: SINGLE VIDEO or MIX");
+            }
+// --------------------------------------------------------------------------------------------------------------------
 
 
-// Function to Download and Convert Each Video to mp3 Format.
-// ----------------------------------------------------------------------------------------------------------------------------
-            const downloadAndConvertToMp3 = (video) =>
+// Ensure the downloads directory exists.
+// --------------------------------------------------------------------------------------------------------------------
+            const downloadsDir = path.join(__dirname, "downloads");
+
+            if (!fs.existsSync(downloadsDir))
+            {
+                fs.mkdirSync(downloadsDir);
+            }
+// --------------------------------------------------------------------------------------------------------------------
+
+
+// Function responsible for downloading media files.
+// --------------------------------------------------------------------------------------------------------------------
+            const downloadMedia = (video) =>
             {
                 return new Promise((resolve, reject) =>
                 {
-                    const sanitizedTitle = video.title.replace(/[^a-zA-Z0-9]/g, "_"); // Sanitizes video title for file naming.
-                    const filePath = path.join(__dirname, "downloads", `${sanitizedTitle}_${video.id}.mp3`); // Defines the output path for the mp3 file.
+                    // Sanitize the video title to avoid illegal file name characters.
+                    const sanitizedTitle = video.title.replace(/[^a-zA-Z0-9]/g, "_");
 
-                    youtubedl(video.url,
+                    // Determine output format depending on request type.
+                    const extension = type === "audio" ? "mp3" : "mp4";
+
+                    // Construct the full file path.
+                    const filePath = path.join(downloadsDir, `${sanitizedTitle}_${video.id}.${extension}`);
+
+
+// Configuration object for youtube-dl-exec.
+// ------------------------------------------------------------------------------------------------------------
+                    const options =
                     {
-                        extractAudio: true,      // Only extract the audio.
-                        audioFormat: "mp3",      // Convert the audio to mp3 format.
-                        output: filePath,        // Specify the output path for the converted file.
-                        ffmpegLocation: "/usr/bin/ffmpeg" // Path to FFmpeg executable (adjust if necessary).
-                    })
+                        output: filePath,
+                        ffmpegLocation: "/usr/bin/ffmpeg"
+                    };
+
+                    // If audio download is requested, extract audio and convert to mp3.
+                    if (type === "audio")
+                    {
+                        options.extractAudio = true;
+                        options.audioFormat = "mp3";
+                    }
+
+                    // If video download is requested, ensure mp4 format.
+                    if (type === "video")
+                    {
+                        options.format = "mp4";
+                    }
+// ------------------------------------------------------------------------------------------------------------
+
+
+// Execute the download process.
+// ------------------------------------------------------------------------------------------------------------
+                    youtubedl(video.url, options)
                     .then(() =>
                     {
-                        console.log(`Downloaded and converted: ${sanitizedTitle}`);
-                        resolve(filePath); // Resolves the promise on successful download and conversion.
+                        console.log(`Downloaded successfully: ${sanitizedTitle}`);
+                        resolve(filePath);
                     })
                     .catch((err) =>
                     {
                         console.error(`Error processing ${sanitizedTitle}:`, err.message);
-                        reject(err); // Rejects the promise if an error occurs.
+                        reject(err);
                     });
+// ------------------------------------------------------------------------------------------------------------
                 });
             };
-// ----------------------------------------------------------------------------------------------------------------------------
-
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Defines downloadAndConvertToMp3, a helper function that downloads and converts each video.
-    The sanitizedTitle variable replaces invalid characters for safe file naming.
-    filePath sets the location and naming convention for each downloaded mp3 file.
-    youtube-dl-exec downloads and converts each video to mp3.
-    On success, the promise resolves with filePath; if an error occurs, the promise is rejected.
-\* -------------------------------------------------------------------------------------------------------------------------- */
+// --------------------------------------------------------------------------------------------------------------------
 
 
-// Initiate Download and Conversion for All Videos.
-// ----------------------------------------------------------------------------------------------------------------------------
-            const downloadPromises = videoList.map(video => downloadAndConvertToMp3(video)); // Maps each video to the download-and-convert function.
-            await Promise.all(downloadPromises); // Waits for all download promises to complete.
+// Download all videos detected from the playlist or single video.
+// --------------------------------------------------------------------------------------------------------------------
+            const downloadPromises = videoList.map(video => downloadMedia(video));
 
-            res.send("All videos downloaded and converted successfully!"); // Sends a success response to the client.
-// ----------------------------------------------------------------------------------------------------------------------------
+            // Wait until all downloads finish.
+            await Promise.all(downloadPromises);
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Maps each video in videoList to the downloadAndConvertToMp3 function, creating an array of download promises.
-    Promise.all() waits for all downloads to complete before sending a success message to the client.
-\* -------------------------------------------------------------------------------------------------------------------------- */
+            // Send response to the client after completion.
+            res.send("Download completed successfully!");
+// --------------------------------------------------------------------------------------------------------------------
 
 
-// Error Handling for Playlist Downloading.
-// ----------------------------------------------------------------------------------------------------------------------------
         }
         catch (error)
         {
-             console.error("Error downloading playlist:", error.message || error); // Logs the error if playlist downloading fails.
-             res.status(500).send(`Error downloading playlist: ${error.message || "Unknown error"}`); // Sends a 500 error response.
+            // Global error handler for the endpoint.
+            console.error("Error downloading media:", error.message || error);
+
+            res.status(500).send(`Error downloading media: ${error.message || "Unknown error"}`);
         }
     });
 // ----------------------------------------------------------------------------------------------------------------------------
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Catches any errors that occur during playlist processing and logs them.
-    Sends a 500 status code response with an error message if the playlist download fails.
-\* -------------------------------------------------------------------------------------------------------------------------- */
 
-
-// Start the Server.
+// Start the Express server.
 // ----------------------------------------------------------------------------------------------------------------------------
     app.listen(port, () =>
     {
@@ -165,15 +175,34 @@
     });
 // ----------------------------------------------------------------------------------------------------------------------------
 
-// Explanation.
-/* -------------------------------------------------------------------------------------------------------------------------- *\
-    Starts the Express server and logs a message indicating the server’s running status and URL.
-\* -------------------------------------------------------------------------------------------------------------------------- */
 
 
 // Summary.
 /* -------------------------------------------------------------------------------------------------------------------------- *\
-    This code sets up an Express server with a single endpoint /download-album to download and convert all videos in a YouTube playlist to mp3 files.
-    The play-dl library fetches playlist metadata, while youtube-dl-exec handles downloading and converting each video.
-    Error handling and logging are included throughout to manage issues with missing URLs or download failures.
+This server exposes a /download-album API endpoint that can download media from YouTube.
+
+Features implemented:
+
+1. Supports multiple YouTube URL types:
+   - Single videos
+   - Playlists
+   - YouTube Mix / Radio links
+
+2. Allows the client to choose the download format:
+   - type=audio → downloads MP3
+   - type=video → downloads MP4
+
+3. Automatically creates a "downloads" directory if it does not exist.
+
+4. Uses play-dl to fetch metadata and youtube-dl-exec to perform the download and conversion.
+
+5. Processes multiple videos in parallel using Promise.all().
+
+Example requests:
+
+Download audio:
+http://localhost:3000/download-album?url=YOUTUBE_URL&type=audio
+
+Download video:
+http://localhost:3000/download-album?url=YOUTUBE_URL&type=video
 \* -------------------------------------------------------------------------------------------------------------------------- */
